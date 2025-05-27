@@ -2,10 +2,7 @@
 session_start();
 include 'koneksi.php';
 
-function capitalizeWords($str) {
-    return ucwords(str_replace('_', ' ', strtolower($str)));
-}
-
+// Daftar tabel dan primary key-nya
 $tables = [
     'restoran' => 'id_restoran',
     'bahan_baku' => 'id_bahan',
@@ -22,186 +19,249 @@ $tables = [
     'ulasan' => 'id_ulasan',
 ];
 
-// Definisikan foreign key dan tabel referensinya
-$foreignKeys = [
-    'id_restoran' => 'restoran',
-    'id_bahan' => 'bahan_baku',
-    'id_karyawan' => 'karyawan',
-    'id_menu' => 'menu',
-    'id_meja' => 'meja_reservasi',
-    'id_pelanggan' => 'pelanggan',
-    'id_member' => 'member',
-    'id_pesanan' => 'pesanan',
-    'id_detail_pesanan' => 'detail_pesanan',
-    'id_resep' => 'resep',
-    'id_transaksi' => 'transaksi',
-    'id_ulasan' => 'ulasan',
-];
-
+// Ambil parameter tabel
 $table = $_GET['table'] ?? '';
 if (!array_key_exists($table, $tables)) {
     die("Tabel tidak valid.");
 }
-
 $primaryKey = $tables[$table];
 
-// Ambil struktur kolom
-$columns = [];
-$stmt = $koneksi->prepare("SHOW COLUMNS FROM `$table`");
-$stmt->execute();
-$result = $stmt->get_result();
+// Ambil struktur tabel
+$result = $koneksi->query("DESCRIBE `$table`");
+if (!$result) {
+    die("Gagal mengambil struktur tabel: " . $koneksi->error);
+}
+
+$fields = [];
 while ($row = $result->fetch_assoc()) {
-    $columns[] = $row;
+    $fields[] = $row;
+}
+
+// Fungsi untuk mendapatkan enum values
+function getEnumValues($type) {
+    preg_match("/^enum\('(.*)'\)$/", $type, $matches);
+    if (!isset($matches[1])) return [];
+    $vals = explode("','", $matches[1]);
+    return $vals;
+}
+
+// Fungsi untuk mengubah string menjadi Title Case
+function toTitleCase($string) {
+    return ucwords(strtolower($string));
 }
 
 $error = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    // Validasi foreign key
-    foreach ($foreignKeys as $fkField => $refTable) {
-        if (isset($_POST[$fkField]) && $_POST[$fkField] !== '') {
-            $fkValue = $_POST[$fkField];
-            $checkStmt = $koneksi->prepare("SELECT COUNT(*) as count FROM `$refTable` WHERE `$fkField` = ?");
-            $checkStmt->bind_param('s', $fkValue);
-            $checkStmt->execute();
-            $checkResult = $checkStmt->get_result()->fetch_assoc();
-            if ($checkResult['count'] == 0) {
-                $error = capitalizeWords($fkField) . " tidak ditemukan atau belum dibuat.";
+    $columns = [];
+    $values = [];
+
+    foreach ($fields as $field) {
+        $name = $field['Field'];
+
+        if ($name === 'gambar_menu' && isset($_FILES['gambar_menu']) && $_FILES['gambar_menu']['error'] === UPLOAD_ERR_OK) {
+            $uploadDir = 'uploads/';
+            if (!is_dir($uploadDir)) {
+                mkdir($uploadDir, 0755, true);
+            }
+            $tmpName = $_FILES['gambar_menu']['tmp_name'];
+            $fileName = basename($_FILES['gambar_menu']['name']);
+            $targetFile = $uploadDir . time() . '_' . preg_replace('/[^a-zA-Z0-9._-]/', '_', $fileName);
+
+            if (move_uploaded_file($tmpName, $targetFile)) {
+                $columns[] = "`$name`";
+                $values[] = "'" . $koneksi->real_escape_string($targetFile) . "'";
+            } else {
+                $error = "Gagal mengupload gambar.";
                 break;
             }
+        } else {
+            $val = $_POST[$name] ?? '';
+            $columns[] = "`$name`";
+            $values[] = "'" . $koneksi->real_escape_string($val) . "'";
         }
     }
 
-    // Validasi dan proses upload gambar jika ada kolom gambar_menu
-    if (empty($error)) {
-        foreach ($columns as $col) {
-            if ($col['Field'] === 'gambar_menu') {
-                if (isset($_FILES['gambar_menu']) && $_FILES['gambar_menu']['error'] !== UPLOAD_ERR_NO_FILE) {
-                    $allowedTypes = ['image/jpeg', 'image/png'];
-                    $fileType = $_FILES['gambar_menu']['type'];
-                    if (!in_array($fileType, $allowedTypes)) {
-                        $error = "Format gambar harus JPG atau PNG.";
-                        break;
-                    }
-                    if ($_FILES['gambar_menu']['size'] > 2 * 1024 * 1024) { // 2MB limit
-                        $error = "Ukuran gambar maksimal 2MB.";
-                        break;
-                    }
-                    $ext = pathinfo($_FILES['gambar_menu']['name'], PATHINFO_EXTENSION);
-                    $newFileName = uniqid('img_') . '.' . $ext;
-                    $uploadDir = 'uploads/';
-                    if (!is_dir($uploadDir)) {
-                        mkdir($uploadDir, 0755, true);
-                    }
-                    $uploadPath = $uploadDir . $newFileName;
-                    if (!move_uploaded_file($_FILES['gambar_menu']['tmp_name'], $uploadPath)) {
-                        $error = "Gagal mengupload gambar.";
-                        break;
-                    }
-                    $_POST['gambar_menu'] = $newFileName;
-                } else {
-                    // Jika kolom gambar_menu wajib, bisa tambahkan validasi di sini
-                    $_POST['gambar_menu'] = null;
-                }
-            }
-        }
-    }
-
-    if (empty($error)) {
-        $fields = [];
-        $placeholders = [];
-        $values = [];
-        foreach ($columns as $col) {
-            $field = $col['Field'];
-            if ($field === $primaryKey && $col['Extra'] === 'auto_increment') {
-                continue; // skip auto increment primary key
-            }
-            $fields[] = "`$field`";
-            $placeholders[] = "?";
-
-            // Untuk input datetime-local, ubah format ke MySQL DATETIME
-            if (strpos($col['Type'], 'datetime') !== false && isset($_POST[$field]) && $_POST[$field] !== '') {
-                // Format input datetime-local: yyyy-mm-ddThh:mm
-                // Ubah ke yyyy-mm-dd hh:mm:ss
-                $dt = str_replace('T', ' ', $_POST[$field]) . ':00';
-                $values[] = $dt;
-            } else {
-                $values[] = $_POST[$field] ?? null;
-            }
-        }
-        $sql = "INSERT INTO `$table` (" . implode(',', $fields) . ") VALUES (" . implode(',', $placeholders) . ")";
-        $stmt = $koneksi->prepare($sql);
-        $stmt->bind_param(str_repeat('s', count($values)), ...$values);
-        if ($stmt->execute()) {
-            $_SESSION['notif'] = "Data berhasil ditambahkan pada tabel " . capitalizeWords($table) . ".";
+    if (!$error) {
+        $sql = "INSERT INTO `$table` (" . implode(',', $columns) . ") VALUES (" . implode(',', $values) . ")";
+        if ($koneksi->query($sql)) {
+            $_SESSION['notif'] = "Data berhasil ditambahkan.";
             header("Location: index.php?table=$table");
             exit;
         } else {
-            $error = $stmt->error;
+            $error = "Gagal menambahkan data: " . $koneksi->error;
         }
     }
 }
-
-function e($str) {
-    return htmlspecialchars($str);
-}
 ?>
+
 <!DOCTYPE html>
-<html>
+<html lang="id">
 <head>
-    <title>Tambah Data - <?php echo capitalizeWords($table); ?></title>
+    <meta charset="UTF-8" />
+    <title>Tambah Data - <?= htmlspecialchars($table) ?></title>
     <style>
-        body { font-family: Arial, sans-serif; padding: 20px; }
-        form { max-width: 600px; }
-        label { display: block; margin-top: 10px; }
-        input, select, textarea { width: 100%; padding: 8px; margin-top: 4px; }
-        button { margin-top: 15px; padding: 10px 15px; background-color: #28a745; color: white; border: none; cursor: pointer; }
-        .error { color: red; margin-top: 10px; }
-        a { text-decoration: none; color: #007bff; }
+        /* Reset & base */
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #f0f4f8;
+            margin: 0;
+            padding: 40px 20px;
+            color: #333;
+        }
+        .container {
+            max-width: 700px;
+            background: #fff;
+            margin: auto;
+            padding: 30px 40px;
+            border-radius: 12px;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.1);
+            transition: box-shadow 0.3s ease;
+        }
+        .container:hover {
+            box-shadow: 0 12px 30px rgba(0,0,0,0.15);
+        }
+        h2 {
+            margin-bottom: 25px;
+            font-weight: 700;
+            font-size: 28px;
+            color: #007BFF;
+            text-align: center;
+        }
+        form label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #555;
+            margin-top: 18px;
+        }
+        form input[type="text"],
+        form input[type="date"],
+        form input[type="time"],
+        form select,
+        form input[type="file"] {
+            width: 100%;
+            padding: 12px 15px;
+            border: 1.8px solid #ccc;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        form input[type="text"]:focus,
+        form input[type="date"]:focus,
+        form input[type="time"]:focus,
+        form select:focus,
+        form input[type="file"]:focus {
+            border-color: #007BFF;
+            box-shadow: 0 0 8px rgba(0,123,255,0.3);
+            outline: none;
+        }
+        .btn-group {
+            margin-top: 30px;
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+        }
+        button {
+            padding: 14px 28px;
+            font-size: 18px;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: 700;
+            transition: background-color 0.3s ease;
+            color: #fff;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        button.submit-btn {
+            background-color: #007BFF;
+        }
+        button.submit-btn:hover {
+            background-color: #0056b3;
+        }
+        button.cancel-btn {
+            background-color: #6c757d;
+        }
+        button.cancel-btn:hover {
+            background-color: #5a6268;
+        }
+        .notif {
+            padding: 12px 20px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            color: #155724;
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            font-weight: 600;
+            text-align: center;
+        }
+        .error {
+            padding: 12px 20px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            color: #721c24;
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            font-weight: 600;
+            text-align: center;
+        }
     </style>
 </head>
 <body>
+<div class="container">
+    <h2>Tambah Data - <?= htmlspecialchars(ucwords(str_replace('_', ' ', $table))) ?></h2>
 
-<h1>Tambah Data - <?php echo capitalizeWords($table); ?></h1>
-<a href="index.php?table=<?php echo e($table); ?>">&laquo; Kembali</a>
+    <?php if (!empty($error)): ?>
+        <div class="error"><?= htmlspecialchars($error) ?></div>
+    <?php endif; ?>
 
-<?php if (!empty($error)): ?>
-    <div class="error"><?php echo e($error); ?></div>
-<?php endif; ?>
+    <form method="post" action="" enctype="multipart/form-data">
+        <?php foreach ($fields as $field):
+            $name = $field['Field'];
+            $type = $field['Type'];
+            $null = $field['Null'] === 'NO' ? 'required' : '';
 
-<form method="post" enctype="multipart/form-data">
-    <?php foreach ($columns as $col): 
-        $field = $col['Field'];
-        $type = $col['Type'];
-        $null = $col['Null'] === 'YES';
-        $extra = $col['Extra'];
-        if ($field === $primaryKey && $extra === 'auto_increment') continue;
-    ?>
-        <label for="<?php echo e($field); ?>"><?php echo capitalizeWords($field); ?><?php echo $null ? '' : ' *'; ?></label>
-
-        <?php if ($field === 'gambar_menu'): ?>
-            <input type="file" name="gambar_menu" id="gambar_menu" accept=".jpg,.jpeg,.png" <?php echo $null ? '' : 'required'; ?>>
-        <?php elseif (strpos($type, 'enum') === 0): 
-            preg_match("/enum\((.*)\)/", $type, $matches);
-            $options = explode(',', str_replace("'", "", $matches[1]));
-        ?>
-            <select name="<?php echo e($field); ?>" id="<?php echo e($field); ?>" <?php echo $null ? '' : 'required'; ?>>
-                <option value="">-- Pilih --</option>
-                <?php foreach ($options as $opt): ?>
-                    <option value="<?php echo e($opt); ?>"><?php echo e($opt); ?></option>
-                <?php endforeach; ?>
-            </select>
-        <?php elseif (strpos($type, 'date') === 0): ?>
-            <input type="date" name="<?php echo e($field); ?>" id="<?php echo e($field); ?>" <?php echo $null ? '' : 'required'; ?>>
-        <?php elseif (strpos($type, 'datetime') === 0): ?>
-            <input type="datetime-local" name="<?php echo e($field); ?>" id="<?php echo e($field); ?>" <?php echo $null ? '' : 'required'; ?>>
-        <?php elseif (strpos($type, 'text') !== false): ?>
-            <textarea name="<?php echo e($field); ?>" id="<?php echo e($field); ?>" <?php echo $null ? '' : 'required'; ?>></textarea>
-        <?php else: ?>
-            <input type="text" name="<?php echo e($field); ?>" id="<?php echo e($field); ?>" <?php echo $null ? '' : 'required'; ?>>
-        <?php endif; ?>
-    <?php endforeach; ?>
-    <button type="submit">Simpan</button>
-</form>
-
+            // **Tampilkan semua field termasuk primary key untuk input manual**
+            if (preg_match('/^enum\((.*)\)$/', $type)) {
+                $options = getEnumValues($type);
+                ?>
+                <label for="<?= $name ?>"><?= ucwords(str_replace('_', ' ', $name)) ?></label>
+                <select name="<?= $name ?>" id="<?= $name ?>" <?= $null ?> >
+                    <option value="">-- Pilih --</option>
+                    <?php foreach ($options as $opt): ?>
+                        <option value="<?= htmlspecialchars($opt) ?>"><?= htmlspecialchars(toTitleCase($opt)) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            <?php
+            } elseif (strpos($type, 'date') !== false) {
+                ?>
+                <label for="<?= $name ?>"><?= ucwords(str_replace('_', ' ', $name)) ?></label>
+                <input type="date" name="<?= $name ?>" id="<?= $name ?>" <?= $null ?> />
+            <?php
+            } elseif (strpos($type, 'time') !== false) {
+                ?>
+                <label for="<?= $name ?>"><?= ucwords(str_replace('_', ' ', $name)) ?></label>
+                <input type="time" name="<?= $name ?>" id="<?= $name ?>" <?= $null ?> />
+            <?php
+            } elseif ($name === 'gambar_menu') {
+                ?>
+                <label for="<?= $name ?>"><?= ucwords(str_replace('_', ' ', $name)) ?></label>
+                <input type="file" name="<?= $name ?>" id="<?= $name ?>" <?= $null ?> />
+            <?php
+            } else {
+                ?>
+                <label for="<?= $name ?>"><?= ucwords(str_replace('_', ' ', $name)) ?></label>
+                <input type="text" name="<?= $name ?>" id="<?= $name ?>" <?= $null ?> />
+            <?php
+            }
+        endforeach; ?>
+        <div class="btn-group">
+            <button type="submit" class="submit-btn">Tambah Data</button>
+            <button type="button" class="cancel-btn" onclick="window.location.href='index.php?table=<?= htmlspecialchars($table) ?>'">Batal</button>
+        </div>
+    </form>
+</div>
 </body>
 </html>
