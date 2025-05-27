@@ -2,6 +2,7 @@
 session_start();
 include 'koneksi.php';
 
+// Daftar tabel dan primary key-nya
 $tables = [
     'restoran' => 'id_restoran',
     'bahan_baku' => 'id_bahan',
@@ -18,45 +19,39 @@ $tables = [
     'ulasan' => 'id_ulasan',
 ];
 
-function formatTableName($table) {
-    return ucwords(str_replace('_', ' ', $table));
-}
-
+// Ambil parameter dari query string
 $table = $_GET['table'] ?? '';
 $id = $_GET['id'] ?? '';
 
 if (!array_key_exists($table, $tables)) {
     die("Tabel tidak valid.");
 }
-if (!$id) {
-    die("ID tidak ditemukan.");
-}
 
 $primaryKey = $tables[$table];
-$formattedTableName = formatTableName($table);
 
-// Jika belum ada konfirmasi, tampilkan halaman konfirmasi
+// Jika belum ada konfirmasi, tampilkan form konfirmasi
 if (!isset($_POST['confirm'])) {
     ?>
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Konfirmasi Hapus Data</title>
+        <title><?php echo ucwords(str_replace('_', ' ', $table)); ?> - Hapus Data</title>
         <style>
-            body { font-family: Arial, sans-serif; padding: 20px; }
-            .container { max-width: 500px; margin: auto; text-align: center; }
-            button { padding: 10px 20px; margin: 10px; cursor: pointer; }
-            .btn-yes { background-color: #dc3545; color: white; border: none; }
-            .btn-no { background-color: #6c757d; color: white; border: none; }
+            body { font-family: Arial, sans-serif; margin: 2rem; }
+            .container { max-width: 500px; margin: auto; padding: 1rem; border: 1px solid #ccc; border-radius: 8px; }
+            h1 { color: #d9534f; }
+            button { padding: 0.5rem 1rem; margin-right: 1rem; border: none; border-radius: 4px; cursor: pointer; }
+            .btn-danger { background-color: #d9534f; color: white; }
+            .btn-secondary { background-color: #6c757d; color: white; }
         </style>
     </head>
     <body>
         <div class="container">
-            <h2>Konfirmasi Hapus Data</h2>
-            <p>Apakah Anda yakin ingin menghapus id <strong><?php echo htmlspecialchars($id); ?></strong> pada tabel <strong><?php echo $formattedTableName; ?></strong>?</p>
+            <h1>Hapus <?php echo ucwords(str_replace('_', ' ', $table)); ?></h1>
+            <p>Apakah Anda yakin ingin menghapus data dengan <strong><?php echo htmlspecialchars($primaryKey); ?></strong> = <strong><?php echo htmlspecialchars($id); ?></strong>?</p>
             <form method="post">
-                <button type="submit" name="confirm" value="yes" class="btn-yes">Ya</button>
-                <button type="submit" name="confirm" value="no" class="btn-no">Batal</button>
+                <button type="submit" name="confirm" value="yes" class="btn-danger">Ya, Hapus</button>
+                <a href="index.php?table=<?php echo urlencode($table); ?>" class="btn-secondary" style="text-decoration:none; padding:0.5rem 1rem; border-radius:4px;">Batal</a>
             </form>
         </div>
     </body>
@@ -65,35 +60,26 @@ if (!isset($_POST['confirm'])) {
     exit;
 }
 
-// Jika user memilih batal, redirect ke halaman index
-if ($_POST['confirm'] === 'no') {
+// Jika sudah konfirmasi hapus
+if ($_POST['confirm'] === 'yes') {
+    // Escape id untuk keamanan
+    $idEscaped = $koneksi->real_escape_string($id);
+
+    // Query hapus data
+    $sql = "DELETE FROM `$table` WHERE `$primaryKey` = '$idEscaped' LIMIT 1";
+
+    if ($koneksi->query($sql)) {
+        $_SESSION['notif'] = "Data berhasil dihapus.";
+    } else {
+        $_SESSION['notif'] = "Gagal menghapus data: " . $koneksi->error;
+    }
+
+    // Redirect ke index.php
+    header("Location: index.php?table=$table");
+    exit;
+} else {
+    // Jika konfirmasi tidak 'yes', redirect ke index.php
     header("Location: index.php?table=$table");
     exit;
 }
-
-// Jika user memilih ya, lakukan penghapusan
-$stmt = $koneksi->prepare("DELETE FROM `$table` WHERE `$primaryKey` = ?");
-$stmt->bind_param('s', $id);
-
-if ($stmt->execute()) {
-    ?>
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Data Berhasil Dihapus</title>
-        <style>
-            body { font-family: Arial, sans-serif; padding: 20px; text-align: center; }
-            a { display: inline-block; margin-top: 20px; text-decoration: none; color: #007bff; }
-        </style>
-    </head>
-    <body>
-        <h2>Data Berhasil Dihapus</h2>
-        <p>Id <strong><?php echo htmlspecialchars($id); ?></strong> pada tabel <strong><?php echo $formattedTableName; ?></strong> berhasil dihapus.</p>
-        <a href="index.php?table=<?php echo htmlspecialchars($table); ?>">&laquo; Kembali ke Daftar <?php echo $formattedTableName; ?></a>
-    </body>
-    </html>
-    <?php
-    exit;
-} else {
-    die("Gagal menghapus data: " . $stmt->error);
-}
+?>
